@@ -28,8 +28,12 @@ const gradients = [
   'radial-gradient(circle at 25% 60%, rgba(0,200,255,0.25), transparent 45%), radial-gradient(circle at 75% 40%, rgba(255,0,120,0.18), transparent 40%), radial-gradient(circle at 50% 50%, rgba(0,255,65,0.18), transparent 45%)',
 ];
 
+const githubRepositoryUrl = 'https://github.com/clencyc/LiveEdit';
+const githubRepositoryApiUrl = 'https://api.github.com/repos/clencyc/LiveEdit';
+
 const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
   const [index, setIndex] = useState(0);
+  const [githubStars, setGithubStars] = useState<number | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -38,8 +42,38 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const loadGithubStars = async () => {
+      try {
+        const response = await fetch(githubRepositoryApiUrl, {
+          headers: { Accept: 'application/vnd.github+json' },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`GitHub returned ${response.status}`);
+        }
+        const repository = (await response.json()) as { stargazers_count?: number };
+        if (typeof repository.stargazers_count === 'number') {
+          setGithubStars(repository.stargazers_count);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error('Unable to load GitHub star count:', error);
+        }
+      }
+    };
+
+    void loadGithubStars();
+    return () => controller.abort();
+  }, []);
+
   const slide = slides[index];
   const gradient = gradients[index];
+  const formattedGithubStars = githubStars === null
+    ? '—'
+    : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(githubStars);
 
   return (
     <div className="min-h-screen bg-[#050505] text-white overflow-hidden relative pb-24">
@@ -97,13 +131,18 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
                 Sponsor
               </a>
               <a
-                href="https://github.com/clencyc/LiveEdit"
+                href={githubRepositoryUrl}
                 target="_blank"
                 rel="noreferrer"
+                aria-label={`Star Live Edit on GitHub${githubStars === null ? '' : ` (${githubStars} stars)`}`}
                 className="inline-flex items-center gap-2 rounded-xl border border-neutral-700 bg-[#0d0d0d] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.25em] text-white hover:border-[#00ff41] hover:text-[#00ff41] transition-all"
               >
                 <i className="fab fa-github" />
-                GitHub
+                <span className="inline-flex items-center gap-1.5">
+                  <span>Star</span>
+                  <span aria-hidden="true">★</span>
+                  <span className="text-neutral-400">{formattedGithubStars}</span>
+                </span>
               </a>
             </div>
           </div>
@@ -274,7 +313,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
                   </p>
                   <div className="flex flex-wrap justify-center md:justify-start gap-3">
                     {[
-                      { icon: 'fa-github', href: '#', label: 'GitHub' },
+                      { icon: 'fa-github', href: 'https://github.com/clencyc/LiveEdit', label: 'GitHub' },
                       { icon: 'fa-twitter', href: '#', label: 'Twitter' },
                       { icon: 'fa-linkedin', href: '#', label: 'LinkedIn' },
                     ].map((link, i) => (
