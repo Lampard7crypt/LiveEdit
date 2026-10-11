@@ -68,10 +68,26 @@ const App: React.FC = () => {
     let cancelled = false;
     const loadLiveEditAccount = async () => {
       try {
-        const response = await apiFetch(`${requireBackendUrl()}/api/auth/session`);
-        const data = await response.json();
+        const token = await getIdToken();
+        if (!token) {
+          throw new Error('Your sign-in session is still initializing. Please try again.');
+        }
+
+        const response = await apiFetch(`${requireBackendUrl()}/api/auth/session`, {
+          credentials: 'include',
+        });
+        const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(data.error || 'Unable to set up your LiveEdit account');
+          if (response.status === 401) {
+            throw new Error('Your sign-in session expired. Please sign in again.');
+          }
+          if (response.status === 403) {
+            throw new Error(data.error || 'A verified Google email is required.');
+          }
+          throw new Error(data.error || 'Unable to set up your LiveEdit account.');
+        }
+        if (!data.email) {
+          throw new Error('LiveEdit did not receive your account email. Please sign in again.');
         }
         if (!cancelled) {
           setUserEmail(data.email);
@@ -81,7 +97,7 @@ const App: React.FC = () => {
         }
       } catch (error) {
         if (!cancelled) {
-          setAuthError(error instanceof Error ? error.message : 'Sign-in failed');
+          setAuthError(error instanceof Error ? error.message : 'Sign-in failed.');
         }
       }
     };

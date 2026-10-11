@@ -18,8 +18,10 @@ const AuthForm: React.FC<AuthFormProps> = ({ onClose }) => {
         >
           Back
         </button>
-        <h1 className="mb-2 text-xl font-bold text-white">Sign in to Live Edit</h1>
-        <p className="mb-6 text-sm text-neutral-400">Continue securely with your Google account.</p>
+        <h1 className="mb-2 text-xl font-bold text-white">Sign in or create an account</h1>
+        <p className="mb-6 text-sm text-neutral-400">
+          Continue securely with Google. New users are registered automatically.
+        </p>
         <button
           type="button"
           disabled={isLoading}
@@ -29,9 +31,13 @@ const AuthForm: React.FC<AuthFormProps> = ({ onClose }) => {
           })}
           className="w-full rounded bg-[#00ff41] px-4 py-3 font-bold text-black hover:bg-[#00e03a] disabled:cursor-wait disabled:opacity-60"
         >
-          {isLoading ? 'Redirecting…' : 'Continue with Google'}
+          {isLoading ? 'Connecting…' : 'Continue with Google'}
         </button>
-        {error && <p className="mt-4 text-sm text-red-400">{error.message}</p>}
+        {error && (
+          <p role="alert" className="mt-4 text-sm text-red-400">
+            {error.message || 'Unable to connect to Google sign-in. Please try again.'}
+          </p>
+        )}
       </div>
     </div>
   );

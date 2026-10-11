@@ -86,8 +86,8 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
 
       <header className="relative z-10 pt-6 px-4">
         <div className="mx-auto max-w-6xl rounded-2xl border border-[#3b2d44] bg-[#201b2d]/90 shadow-[0_8px_30px_rgba(14,10,22,0.7)] backdrop-blur-sm">
-          <div className="flex items-center justify-between gap-4 px-5 py-4">
-            <div className="flex items-center gap-3 min-w-0">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-3 py-3 sm:px-5 sm:py-4">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
               <div className="w-9 h-9 rounded-full bg-[#00ff41] flex items-center justify-center shadow-[0_0_40px_rgba(0,255,65,0.35)] shrink-0">
                 <i className="fas fa-play text-black text-xs" />
               </div>
@@ -97,7 +97,7 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
               </div>
             </div>
 
-            <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-neutral-200">
+            <nav className="order-3 flex w-full items-center gap-5 overflow-x-auto pb-1 text-xs font-medium text-neutral-200 md:order-none md:w-auto md:gap-8 md:pb-0 md:text-sm">
               {[
                 { label: 'Home', href: '#top' },
                 { label: 'Hall of Fame', href: '#hall-of-fame' },
@@ -107,17 +107,17 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
                 <a
                   key={item.label}
                   href={item.href}
-                  className="transition-colors hover:text-[#00ff41]"
+                  className="shrink-0 whitespace-nowrap transition-colors hover:text-[#00ff41]"
                 >
                   {item.label}
                 </a>
               ))}
             </nav>
 
-            <div className="flex items-center gap-3 ml-auto">
+            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2 sm:gap-3">
               <button
                 onClick={onStart}
-                className="hidden sm:inline-flex px-4 py-2 bg-[#00ff41] text-black font-bold uppercase text-[10px] tracking-[0.25em] shadow-[0_10px_40px_rgba(0,255,65,0.45)] hover:bg-[#00e03a] transition-all"
+                className="hidden bg-[#00ff41] px-3 py-2 text-[9px] font-bold uppercase tracking-[0.18em] text-black shadow-[0_10px_40px_rgba(0,255,65,0.45)] transition-all hover:bg-[#00e03a] sm:inline-flex sm:px-4 sm:text-[10px] sm:tracking-[0.25em]"
               >
                 Get Started
               </button>
@@ -125,21 +125,21 @@ const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
                 href="https://github.com/sponsors/clencyc"
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-2 rounded-xl border border-[#00ff41] bg-[#00ff41]/10 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.25em] text-[#00ff41] hover:bg-[#00ff41]/20 transition-all"
+                className="inline-flex items-center gap-2 rounded-xl border border-[#00ff41] bg-[#00ff41]/10 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-[#00ff41] transition-all hover:bg-[#00ff41]/20 sm:px-4 sm:text-[11px] sm:tracking-[0.25em]"
               >
                 <span aria-hidden="true">♥</span>
-                Sponsor
+                <span className="hidden sm:inline">Sponsor</span>
               </a>
               <a
                 href={githubRepositoryUrl}
                 target="_blank"
                 rel="noreferrer"
                 aria-label={`Star Live Edit on GitHub${githubStars === null ? '' : ` (${githubStars} stars)`}`}
-                className="inline-flex items-center gap-2 rounded-xl border border-neutral-700 bg-[#0d0d0d] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.25em] text-white hover:border-[#00ff41] hover:text-[#00ff41] transition-all"
+                className="inline-flex items-center gap-2 rounded-xl border border-neutral-700 bg-[#0d0d0d] px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white transition-all hover:border-[#00ff41] hover:text-[#00ff41] sm:px-4 sm:text-[11px] sm:tracking-[0.25em]"
               >
                 <i className="fab fa-github" />
                 <span className="inline-flex items-center gap-1.5">
-                  <span>Star</span>
+                  <span className="hidden sm:inline">Star</span>
                   <span aria-hidden="true">★</span>
                   <span className="text-neutral-400">{formattedGithubStars}</span>
                 </span>
