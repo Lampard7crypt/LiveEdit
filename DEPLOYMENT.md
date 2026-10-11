@@ -122,7 +122,9 @@ VITE_API_URL=https://liveedit-backend-xxxxx.a.run.app
 - Run: `gcloud storage buckets add-iam-policy-binding gs://liveedit --member="serviceAccount:default@rare-decker-488711-c0.iam.gserviceaccount.com" --role="roles/storage.admin"`
 
 ### CORS errors
-- Check that `FRONTEND_URL` environment variable is set correctly on the backend
+- Check that backend CORS env vars are set correctly:
+  - `FRONTEND_URL` for one origin, or
+  - `FRONTEND_URLS` for multiple comma-separated origins (for example `https://livedit.space,https://www.livedit.space`)
 - Update `app.py` CORS origins if needed
 
 ### Celery/Redis not working

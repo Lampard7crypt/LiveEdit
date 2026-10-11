@@ -154,6 +154,7 @@ def start_interaction_session(
     cache_name: Optional[str] = None,
     analysis: Optional[Dict[str, Any]] = None,
     video_intelligence: Optional[Dict[str, Any]] = None,
+    owner_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Initialize a stateful video editing conversation session."""
     session_id = f"sess_{uuid.uuid4().hex[:16]}"
@@ -161,6 +162,7 @@ def start_interaction_session(
         "session_id": session_id,
         "created_at": datetime.utcnow().isoformat(),
         "gemini_file_uri": gemini_file_uri,
+        "owner_id": owner_id,
         "gemini_mime_type": gemini_mime_type or "video/mp4",
         "cache_name": cache_name,
         "analysis": analysis or {},

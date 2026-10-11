@@ -73,8 +73,32 @@ def video_file():
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
+    import app as app_module
     from app import app as flask_app
+
+    class TestCursor:
+        def execute(self, *_args, **_kwargs):
+            pass
+
+        def fetchone(self):
+            return {"id": 1, "email": "test@example.com"}
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class TestConnection:
+        def cursor(self):
+            return TestCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_module, "verify_logto_token", lambda _token: {"sub": "user_test"})
+    monkeypatch.setattr(app_module, "get_db_connection", TestConnection)
 
     flask_app.config["TESTING"] = True
     flask_app.config["DEBUG"] = False
@@ -83,7 +107,9 @@ def app():
 
 @pytest.fixture
 def client(app):
-    return app.test_client()
+    test_client = app.test_client()
+    test_client.environ_base["HTTP_AUTHORIZATION"] = "Bearer test-session-token"
+    return test_client
 
 
 # ─────────────────────────────────────────────

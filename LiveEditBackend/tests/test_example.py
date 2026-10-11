@@ -15,9 +15,34 @@ from unittest.mock import patch, MagicMock
 # ─────────────────────────────────────────────
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
     """Create a Flask test app instance."""
+    import app as app_module
     from app import app as flask_app
+
+    class TestCursor:
+        def execute(self, *_args, **_kwargs):
+            pass
+
+        def fetchone(self):
+            return {"id": 1, "email": "test@example.com"}
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class TestConnection:
+        def cursor(self):
+            return TestCursor()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_module, "verify_logto_token", lambda _token: {"sub": "user_test"})
+    monkeypatch.setattr(app_module, "get_db_connection", TestConnection)
+
     flask_app.config["TESTING"] = True
     flask_app.config["DEBUG"] = False
     yield flask_app
@@ -26,7 +51,9 @@ def app():
 @pytest.fixture
 def client(app):
     """Flask test client — use instead of running the real server."""
-    return app.test_client()
+    test_client = app.test_client()
+    test_client.environ_base["HTTP_AUTHORIZATION"] = "Bearer test-session-token"
+    return test_client
 
 
 # ─────────────────────────────────────────────
@@ -84,15 +111,41 @@ class TestHealthEndpoint:
         assert "application/json" in response.content_type
 
 
+class TestAuthenticationMiddleware:
+    def test_api_rejects_requests_without_logto_token(self, app):
+        response = app.test_client().get("/api/cache/stats")
+        assert response.status_code == 401
+
+    def test_logto_session_requires_verified_email(self, app, monkeypatch):
+        import app as app_module
+
+        monkeypatch.setattr(
+            app_module,
+            "verify_logto_token",
+            lambda _token: {
+                "sub": "logto-user-test",
+                "email": "test@example.com",
+                "email_verified": False,
+            },
+        )
+        response = app.test_client().get(
+            "/api/auth/session",
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+        assert response.status_code == 403
+
+    def test_subscription_catalog_remains_public(self, app):
+        response = app.test_client().get("/api/payments/plans")
+        assert response.status_code == 200
+
+
 class TestChatEndpoint:
     """Tests for POST /api/chat"""
 
-    # ai_client.get_genai_client is what app.py actually uses
-    @patch("ai_client.get_genai_client")
-    def test_chat_returns_200_with_valid_message(self, mock_get_client, client):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.return_value.text = "Here are your suggestions."
-        mock_get_client.return_value = mock_client
+    @patch("app.ai_client")
+    def test_chat_returns_200_with_valid_message(self, mock_ai_client, client):
+        mock_ai_client.models.generate_content.return_value.text = "Here are your suggestions."
 
         response = client.post(
             "/api/chat",
@@ -101,11 +154,9 @@ class TestChatEndpoint:
         )
         assert response.status_code == 200
 
-    @patch("ai_client.get_genai_client")
-    def test_chat_response_contains_message_field(self, mock_get_client, client):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.return_value.text = "Cut at 10 seconds."
-        mock_get_client.return_value = mock_client
+    @patch("app.ai_client")
+    def test_chat_response_contains_message_field(self, mock_ai_client, client):
+        mock_ai_client.models.generate_content.return_value.text = "Cut at 10 seconds."
 
         response = client.post(
             "/api/chat",
@@ -131,11 +182,9 @@ class TestChatEndpoint:
         )
         assert response.status_code in (400, 422)
 
-    @patch("ai_client.get_genai_client")
-    def test_chat_handles_ai_client_error(self, mock_get_client, client):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = Exception("Quota exceeded")
-        mock_get_client.return_value = mock_client
+    @patch("app.ai_client")
+    def test_chat_handles_ai_client_error(self, mock_ai_client, client):
+        mock_ai_client.models.generate_content.side_effect = Exception("Quota exceeded")
 
         response = client.post(
             "/api/chat",
@@ -186,12 +235,10 @@ class TestVideoAnalysisEndpoint:
 
 class TestChatIntegration:
 
-    @patch("ai_client.get_genai_client")
-    def test_full_request_response_cycle(self, mock_get_client, client):
+    @patch("app.ai_client")
+    def test_full_request_response_cycle(self, mock_ai_client, client):
         """Full flow: POST message → Flask processes → returns AI response."""
-        mock_client = MagicMock()
-        mock_client.models.generate_content.return_value.text = "Try cutting at 10s."
-        mock_get_client.return_value = mock_client
+        mock_ai_client.models.generate_content.return_value.text = "Try cutting at 10s."
 
         response = client.post(
             "/api/chat",
@@ -202,12 +249,10 @@ class TestChatIntegration:
         data = json.loads(response.data)
         assert "message" in data
 
-    @patch("ai_client.get_genai_client")
-    def test_sequential_requests_do_not_bleed_state(self, mock_get_client, client):
+    @patch("app.ai_client")
+    def test_sequential_requests_do_not_bleed_state(self, mock_ai_client, client):
         """Multiple requests should each return independently."""
-        mock_client = MagicMock()
-        mock_client.models.generate_content.return_value.text = "Response"
-        mock_get_client.return_value = mock_client
+        mock_ai_client.models.generate_content.return_value.text = "Response"
 
         for i in range(3):
             response = client.post(

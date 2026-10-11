@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -7,6 +5,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 
+import jwt
 import psycopg2
 from ai_client import (
     API_KEY,
@@ -18,7 +17,7 @@ from ai_client import (
     using_vertex_ai,
 )
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 from flask_cors import CORS
 from psycopg2.extras import RealDictCursor
 from video_director import (
@@ -45,14 +44,14 @@ from video_tasks import (
     edit_video_task,
 )
 from werkzeug.utils import secure_filename
+from logto_auth import verify_logto_token
 
 load_dotenv()
 
 app = Flask(__name__)
 
-# Get frontend URL from environment (for production deployments)
-FRONTEND_URL = os.getenv("FRONTEND_URL", "")
-ALLOWED_ORIGINS = [
+# Get frontend URL(s) from environment (for production deployments)
+DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
@@ -62,8 +61,31 @@ ALLOWED_ORIGINS = [
     "https://www.livedit.space",
     "https://rare-decker-488711-c0.web.app",
 ]
-if FRONTEND_URL:
-    ALLOWED_ORIGINS.append(FRONTEND_URL)
+
+
+def _parse_origin_list(env_value: str) -> list[str]:
+    origins = []
+    for raw in env_value.replace(";", ",").split(","):
+        origin = raw.strip()
+        if origin:
+            origins.append(origin)
+    return origins
+
+
+configured_origins = []
+configured_origins.extend(_parse_origin_list(os.getenv("FRONTEND_URL", "")))
+configured_origins.extend(_parse_origin_list(os.getenv("FRONTEND_URLS", "")))
+ALLOWED_ORIGINS = sorted(set(DEFAULT_ALLOWED_ORIGINS + configured_origins))
+
+
+def _is_allowed_origin(origin: str | None) -> bool:
+    if not origin:
+        return False
+    return (
+        origin in ALLOWED_ORIGINS
+        or origin.endswith(".vercel.app")
+        or origin.endswith(".livedit.space")
+    )
 
 # Configure CORS with proper settings for cookies and credentials
 CORS(
@@ -80,11 +102,55 @@ CORS(
 )
 
 
+@app.before_request
+def require_logto_authentication():
+    if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        return ("", 204)
+    if not request.path.startswith("/api/"):
+        return None
+    if request.path == "/api/payments/plans":
+        return None
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return jsonify({"error": "Authentication required"}), 401
+
+    try:
+        g.logto_claims = verify_logto_token(token)
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid or expired authentication token"}), 401
+    except Exception:
+        app.logger.exception("Logto token verification is unavailable")
+        return jsonify({"error": "Authentication service unavailable"}), 503
+
+    if request.path == "/api/auth/session":
+        return None
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, email FROM users WHERE logto_user_id = %s",
+            (g.logto_claims["sub"],),
+        )
+        g.auth_user = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception:
+        app.logger.exception("Failed to resolve authenticated user")
+        return jsonify({"error": "Authentication service unavailable"}), 503
+
+    if not g.auth_user:
+        return jsonify({"error": "Account setup required"}), 403
+    return None
+
+
 # Additional CORS headers for all responses
 @app.after_request
 def after_request(response):
     origin = request.headers.get("Origin")
-    if origin in ALLOWED_ORIGINS or (origin and origin.endswith(".vercel.app")):
+    if _is_allowed_origin(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = (
@@ -127,6 +193,24 @@ os.makedirs(JOB_WORKDIR, exist_ok=True)
 def get_db_connection():
     """Create a new database connection"""
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def get_owned_ingestion_file(gemini_file_uri: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT gemini_file_uri, filename, cache_name, duration, gcs_uri
+            FROM user_video_files
+            WHERE gemini_file_uri = %s AND user_id = %s
+            """,
+            (gemini_file_uri, g.auth_user["id"]),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
 
 
 def save_video_to_db(
@@ -295,25 +379,6 @@ def extract_videos_to_workspace(job_id: str) -> list:
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def hash_password(password: str) -> str:
-    """Hash a password using PBKDF2"""
-    salt = secrets.token_hex(16)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
-    return f"{salt}${key.hex()}"
-
-
-def verify_password(password: str, hash_val: str) -> bool:
-    """Verify a password against its hash"""
-    try:
-        salt, key = hash_val.split("$")
-        new_key = hashlib.pbkdf2_hmac(
-            "sha256", password.encode(), salt.encode(), 100000
-        )
-        return hmac.compare_digest(new_key.hex(), key)
-    except:
-        return False
-
-
 def init_auth_table():
     """Create users table if it doesn't exist"""
     try:
@@ -323,7 +388,8 @@ def init_auth_table():
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 email VARCHAR(255) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
+                password_hash VARCHAR(255),
+                logto_user_id VARCHAR(255) UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_login TIMESTAMP,
                 subscription_status VARCHAR(50) DEFAULT 'free',
@@ -341,6 +407,14 @@ def init_auth_table():
         )
         cur.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_end_date TIMESTAMP"
+        )
+        cur.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS logto_user_id VARCHAR(255)"
+        )
+        cur.execute("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL")
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_logto_user_id "
+            "ON users (logto_user_id) WHERE logto_user_id IS NOT NULL"
         )
         conn.commit()
         cur.close()
@@ -409,6 +483,7 @@ def init_video_job_table():
             """
             CREATE TABLE IF NOT EXISTS video_jobs (
                 job_id VARCHAR(64) PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
                 job_type VARCHAR(32) NOT NULL,
                 status VARCHAR(32) NOT NULL DEFAULT 'queued',
                 progress NUMERIC(5,2) DEFAULT 0,
@@ -425,6 +500,12 @@ def init_video_job_table():
             """
             ALTER TABLE video_jobs
             ADD COLUMN IF NOT EXISTS cache_status VARCHAR(16)
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE video_jobs
+            ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)
             """
         )
         cur.execute(
@@ -478,6 +559,21 @@ def init_media_tables():
             CREATE INDEX IF NOT EXISTS idx_audio_files_job_id
             ON audio_files (job_id);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_video_files (
+                gemini_file_uri TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                filename VARCHAR(255) NOT NULL,
+                cache_name TEXT,
+                duration DOUBLE PRECISION DEFAULT 0,
+                gcs_uri TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_video_files_user_id
+            ON user_video_files (user_id, created_at DESC)
+        """)
         conn.commit()
         cur.close()
         conn.close()
@@ -498,105 +594,77 @@ def health_check():
     return jsonify({"status": "ok", "message": "Backend is running"})
 
 
-@app.route("/api/auth/signup", methods=["POST"])
-def signup():
-    """Create a new user account"""
+@app.route("/api/auth/session", methods=["GET"])
+def logto_session():
+    """Provision or resolve the LiveEdit account for the authenticated Logto user."""
+    email_claim = g.logto_claims.get("email")
+    if (
+        not isinstance(email_claim, str)
+        or not email_claim.strip()
+        or g.logto_claims.get("email_verified") is not True
+    ):
+        return jsonify({"error": "A verified primary Google email is required"}), 403
+
+    email = email_claim.strip().lower()
+    logto_user_id = g.logto_claims["sub"]
+    conn = None
+    cur = None
     try:
-        data = request.get_json()
-        email = data.get("email", "").strip().lower()
-        password = data.get("password", "")
-
-        if not email or not password:
-            return jsonify({"error": "Email and password are required"}), 400
-
-        if len(password) < 6:
-            return jsonify({"error": "Password must be at least 6 characters"}), 400
-
-        # Check if email is valid
-        import re
-
-        if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
-            return jsonify({"error": "Invalid email format"}), 400
-
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-
-            # Check if user already exists
-            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-            if cur.fetchone():
-                cur.close()
-                conn.close()
-                return jsonify({"error": "Email already registered"}), 409
-
-            # Hash password and create user
-            password_hash = hash_password(password)
-            cur.execute(
-                "INSERT INTO users (email, password_hash) VALUES (%s, %s)",
-                (email, password_hash),
-            )
-            conn.commit()
-
-            # Generate token (in production, use JWT)
-            token = secrets.token_urlsafe(32)
-
-            cur.close()
-            conn.close()
-
-            return jsonify({"success": True, "token": token, "email": email}), 201
-        except psycopg2.IntegrityError:
-            return jsonify({"error": "Email already registered"}), 409
-    except Exception as e:
-        print(f"Signup error: {str(e)}")
-        return jsonify({"error": "Signup failed"}), 500
-
-
-@app.route("/api/auth/login", methods=["POST"])
-def login():
-    """Authenticate a user"""
-    try:
-        data = request.get_json()
-        email = data.get("email", "").strip().lower()
-        password = data.get("password", "")
-
-        if not email or not password:
-            return jsonify({"error": "Email and password are required"}), 400
-
         conn = get_db_connection()
         cur = conn.cursor()
-
-        # Find user
-        cur.execute("SELECT id, password_hash FROM users WHERE email = %s", (email,))
-        user = cur.fetchone()
-
-        if not user or not verify_password(password, user["password_hash"]):
-            cur.close()
-            conn.close()
-            return jsonify({"error": "Invalid email or password"}), 401
-
-        # Update last login
         cur.execute(
-            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
-            (user["id"],),
+            "SELECT id, email FROM users WHERE logto_user_id = %s FOR UPDATE",
+            (logto_user_id,),
         )
+        user = cur.fetchone()
+        if user:
+            if user["email"] != email:
+                cur.execute(
+                    "UPDATE users SET email = %s, last_login = CURRENT_TIMESTAMP "
+                    "WHERE id = %s",
+                    (email, user["id"]),
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
+                    (user["id"],),
+                )
+        else:
+            cur.execute("SELECT id, logto_user_id FROM users WHERE email = %s FOR UPDATE", (email,))
+            user = cur.fetchone()
+            if user and user["logto_user_id"]:
+                conn.rollback()
+                return jsonify({"error": "Email is already linked to another account"}), 409
+            if user:
+                cur.execute(
+                    "UPDATE users SET logto_user_id = %s, "
+                    "last_login = CURRENT_TIMESTAMP WHERE id = %s",
+                    (logto_user_id, user["id"]),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO users (email, password_hash, logto_user_id, last_login) "
+                    "VALUES (%s, NULL, %s, CURRENT_TIMESTAMP) RETURNING id",
+                    (email, logto_user_id),
+                )
+                user = cur.fetchone()
+
         conn.commit()
-
-        # Generate token (in production, use JWT)
-        token = secrets.token_urlsafe(32)
-
-        cur.close()
-        conn.close()
-
-        return jsonify({"success": True, "token": token, "email": email}), 200
-    except Exception as e:
-        print(f"Login error: {str(e)}")
-        return jsonify({"error": "Login failed"}), 500
-
-
-@app.route("/api/auth/logout", methods=["POST"])
-def logout():
-    """Logout endpoint (token cleanup handled on client)"""
-    return jsonify({"success": True, "message": "Logged out successfully"}), 200
+        return jsonify({"success": True, "email": email}), 200
+    except psycopg2.IntegrityError:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": "This email is already linked to another account"}), 409
+    except Exception:
+        if conn:
+            conn.rollback()
+        app.logger.exception("Failed to provision the Logto user")
+        return jsonify({"error": "Failed to set up the LiveEdit account"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.route("/api/audio-effects", methods=["GET"])
@@ -738,10 +806,10 @@ def analyze_video():
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO video_jobs (job_id, job_type, status, progress, message)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO video_jobs (job_id, user_id, job_type, status, progress, message)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (job_id, "analyze", "queued", 0, "Queued for analysis"),
+            (job_id, g.auth_user["id"], "analyze", "queued", 0, "Queued for analysis"),
         )
         conn.commit()
         cur.close()
@@ -777,7 +845,11 @@ def chat():
     """
     try:
         data = request.get_json()
-        if not data or "message" not in data:
+        if (
+            not data
+            or not isinstance(data.get("message"), str)
+            or not data["message"].strip()
+        ):
             return jsonify({"error": "No message provided"}), 400
 
         user_message = data["message"]
@@ -910,10 +982,10 @@ def edit_video():
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO video_jobs (job_id, job_type, status, progress, message)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO video_jobs (job_id, user_id, job_type, status, progress, message)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (job_id, "edit", "queued", 0, "Queued for rendering"),
+            (job_id, g.auth_user["id"], "edit", "queued", 0, "Queued for rendering"),
         )
         conn.commit()
         cur.close()
@@ -1057,9 +1129,9 @@ def get_video_job(job_id):
             SELECT job_id, job_type, status, progress, message, result_path, result_json,
                    cache_status, created_at, updated_at
             FROM video_jobs
-            WHERE job_id = %s
+            WHERE job_id = %s AND user_id = %s
             """,
-            (job_id,),
+            (job_id, g.auth_user["id"]),
         )
         job = cur.fetchone()
         cur.close()
@@ -1096,9 +1168,9 @@ def download_video_job(job_id):
             """
             SELECT result_path, status
             FROM video_jobs
-            WHERE job_id = %s
+            WHERE job_id = %s AND user_id = %s
             """,
-            (job_id,),
+            (job_id, g.auth_user["id"]),
         )
         job = cur.fetchone()
         cur.close()
@@ -1199,10 +1271,17 @@ def edit_multi():
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO video_jobs (job_id, job_type, status, progress, message)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO video_jobs (job_id, user_id, job_type, status, progress, message)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (job_id, "edit-multi", "queued", 0, "Queued for multi-clip rendering"),
+            (
+                job_id,
+                g.auth_user["id"],
+                "edit-multi",
+                "queued",
+                0,
+                "Queued for multi-clip rendering",
+            ),
         )
         conn.commit()
         cur.close()
@@ -1256,11 +1335,11 @@ def initialize_payment():
     """Initialize Paystack payment"""
     try:
         data = request.get_json()
-        email = data.get("email")
+        email = g.auth_user["email"]
         plan_id = data.get("plan_id")
 
-        if not email or not plan_id:
-            return jsonify({"error": "Email and plan_id are required"}), 400
+        if not plan_id:
+            return jsonify({"error": "plan_id is required"}), 400
 
         # Get plan details
         conn = get_db_connection()
@@ -1280,15 +1359,6 @@ def initialize_payment():
             conn.close()
             return jsonify({"error": "Invalid plan"}), 404
 
-        # Get user
-        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-        user = cur.fetchone()
-
-        if not user:
-            cur.close()
-            conn.close()
-            return jsonify({"error": "User not found"}), 404
-
         # Generate reference
         reference = (
             f"LE_{secrets.token_hex(8)}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -1301,7 +1371,13 @@ def initialize_payment():
             VALUES (%s, %s, %s, %s, %s, 'pending')
             RETURNING id
         """,
-            (user["id"], reference, plan["price"], plan["currency"], plan["id"]),
+            (
+                g.auth_user["id"],
+                reference,
+                plan["price"],
+                plan["currency"],
+                plan["id"],
+            ),
         )
         transaction_id = cur.fetchone()["id"]
         conn.commit()
@@ -1381,6 +1457,10 @@ def verify_payment(reference):
             cur.close()
             conn.close()
             return jsonify({"error": "Transaction not found"}), 404
+        if transaction["user_id"] != g.auth_user["id"]:
+            cur.close()
+            conn.close()
+            return jsonify({"error": "Transaction does not belong to this account"}), 403
 
         if transaction["status"] == "success":
             cur.close()
@@ -1474,20 +1554,15 @@ def verify_payment(reference):
 def get_user_subscription():
     """Get user's current subscription status"""
     try:
-        # Get email from auth header or query param
-        email = request.args.get("email")
-        if not email:
-            return jsonify({"error": "Email is required"}), 400
-
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
             """
             SELECT subscription_status, subscription_plan, subscription_end_date
             FROM users
-            WHERE email = %s
+            WHERE id = %s
         """,
-            (email,),
+            (g.auth_user["id"],),
         )
         user = cur.fetchone()
         cur.close()
@@ -1523,10 +1598,6 @@ def get_user_subscription():
 def get_user_transactions():
     """Get user's payment history"""
     try:
-        email = request.args.get("email")
-        if not email:
-            return jsonify({"error": "Email is required"}), 400
-
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -1537,11 +1608,11 @@ def get_user_transactions():
             FROM transactions t
             JOIN users u ON t.user_id = u.id
             LEFT JOIN subscription_plans sp ON t.plan_id = sp.id
-            WHERE u.email = %s
+            WHERE u.id = %s
             ORDER BY t.created_at DESC
             LIMIT 20
         """,
-            (email,),
+            (g.auth_user["id"],),
         )
 
         transactions = cur.fetchall()
@@ -1683,12 +1754,45 @@ def video_ingestion_upload():
 
         # Store the Gemini file URI for follow-up queries
         if "gemini_file_uri" in result:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO user_video_files
+                        (gemini_file_uri, user_id, filename, cache_name, duration, gcs_uri)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (gemini_file_uri) DO NOTHING
+                    """,
+                    (
+                        result["gemini_file_uri"],
+                        g.auth_user["id"],
+                        filename,
+                        result.get("cache_name"),
+                        duration,
+                        result.get("gcs_uri"),
+                    ),
+                )
+                cur.execute(
+                    "SELECT user_id FROM user_video_files WHERE gemini_file_uri = %s",
+                    (result["gemini_file_uri"],),
+                )
+                stored_owner = cur.fetchone()
+                if not stored_owner or stored_owner["user_id"] != g.auth_user["id"]:
+                    conn.rollback()
+                    return jsonify({"error": "Unable to associate uploaded video"}), 409
+                conn.commit()
+            finally:
+                cur.close()
+                conn.close()
+
             _gemini_files_store[result["gemini_file_uri"]] = {
                 "name": result.get("gemini_file_name"),
                 "uri": result["gemini_file_uri"],
                 "filename": filename,
                 "cache_name": result.get("cache_name"),
                 "duration": duration,
+                "owner_id": g.auth_user["id"],
             }
 
         return jsonify(result), 200
@@ -1755,7 +1859,12 @@ def video_ingestion_query():
         if not gemini_file_uri or not prompt:
             return jsonify({"error": "gemini_file_uri and prompt are required"}), 400
 
-        stored = _gemini_files_store.get(gemini_file_uri)
+        stored = get_owned_ingestion_file(gemini_file_uri)
+        if not stored:
+            return jsonify({"error": "Video file not found"}), 404
+        cached_state = _gemini_files_store.get(gemini_file_uri)
+        if cached_state and cached_state.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Video file not found"}), 404
 
         # Try cached path first
         try:
@@ -1783,7 +1892,7 @@ def video_ingestion_query():
             {
                 "answer": answer,
                 "gemini_file_uri": gemini_file_uri,
-                "cached": stored.get("cache_name") is not None if stored else False,
+                "cached": stored.get("cache_name") is not None,
             }
         ), 200
 
@@ -1811,15 +1920,20 @@ def video_ingestion_scene_summary():
         if not gemini_file_uri:
             return jsonify({"error": "gemini_file_uri is required"}), 400
 
-        stored = _gemini_files_store.get(gemini_file_uri)
-        duration = stored.get("duration", 0) if stored else 0
+        stored = get_owned_ingestion_file(gemini_file_uri)
+        if not stored:
+            return jsonify({"error": "Video file not found"}), 404
+        cached_state = _gemini_files_store.get(gemini_file_uri)
+        if cached_state and cached_state.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Video file not found"}), 404
+        duration = stored.get("duration", 0)
 
         # Build a lightweight file-like object with uri and mime_type
         class _GeminiRef:
             def __init__(self, uri):
                 self.uri = uri
                 self.mime_type = "video/mp4"
-                self.name = stored.get("name", "") if stored else ""
+                self.name = (cached_state or {}).get("name", "")
 
         summary = get_scene_summary(
             gemini_file=_GeminiRef(gemini_file_uri),
@@ -1857,6 +1971,18 @@ def video_ingestion_vi():
         if not gcs_uri:
             return jsonify({"error": "gcs_uri is required"}), 400
 
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM user_video_files WHERE gcs_uri = %s AND user_id = %s",
+            (gcs_uri, g.auth_user["id"]),
+        )
+        owns_video = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not owns_video:
+            return jsonify({"error": "Video file not found"}), 404
+
         metadata = extract_video_intelligence_metadata(gcs_uri, features=features)
         return jsonify(metadata), 200
 
@@ -1870,15 +1996,20 @@ def video_ingestion_vi():
 @app.route("/api/video-ingestion/files", methods=["GET"])
 def video_ingestion_list_files():
     """List all uploaded Gemini files that are still available in the session."""
-    files = [
-        {
-            "gemini_file_uri": uri,
-            "filename": info.get("filename"),
-            "cache_name": info.get("cache_name"),
-            "duration": info.get("duration"),
-        }
-        for uri, info in _gemini_files_store.items()
-    ]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT gemini_file_uri, filename, cache_name, duration
+        FROM user_video_files
+        WHERE user_id = %s
+        ORDER BY created_at DESC
+        """,
+        (g.auth_user["id"],),
+    )
+    files = [dict(row) for row in cur.fetchall()]
+    cur.close()
+    conn.close()
     return jsonify({"files": files}), 200
 
 
@@ -1905,13 +2036,19 @@ def video_director_start_session():
         if not gemini_file_uri:
             return jsonify({"error": "gemini_file_uri is required"}), 400
 
-        stored = _gemini_files_store.get(gemini_file_uri, {})
+        stored = get_owned_ingestion_file(gemini_file_uri)
+        if not stored:
+            return jsonify({"error": "Video file not found"}), 404
+        cached_state = _gemini_files_store.get(gemini_file_uri)
+        if cached_state and cached_state.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Video file not found"}), 404
         session = start_interaction_session(
             gemini_file_uri=gemini_file_uri,
             gemini_mime_type=data.get("gemini_mime_type", "video/mp4"),
             cache_name=data.get("cache_name") or stored.get("cache_name"),
             analysis=data.get("analysis") or {},
             video_intelligence=data.get("video_intelligence") or {},
+            owner_id=g.auth_user["id"],
         )
 
         return jsonify(
@@ -1946,6 +2083,9 @@ def video_director_interaction():
         if not session_id or not prompt:
             return jsonify({"error": "session_id and prompt are required"}), 400
 
+        session = get_session(session_id)
+        if session.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Session not found"}), 404
         result = run_interaction_turn(session_id=session_id, user_prompt=prompt)
         return jsonify(result), 200
     except ValueError as ve:
@@ -1974,6 +2114,9 @@ def video_director_plan():
         if not session_id or not creative_brief:
             return jsonify({"error": "session_id and creative_brief are required"}), 400
 
+        session = get_session(session_id)
+        if session.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Session not found"}), 404
         result = generate_structured_edit_plan(
             session_id=session_id,
             creative_brief=creative_brief,
@@ -2038,6 +2181,7 @@ def video_director_render():
             "path": render_result["output_path"],
             "created_at": datetime.utcnow().isoformat(),
             "meta": render_result,
+            "owner_id": g.auth_user["id"],
         }
 
         return jsonify(
@@ -2056,7 +2200,7 @@ def video_director_render():
 def video_director_download_render(render_id: str):
     """Download a previously rendered video."""
     info = _rendered_video_store.get(render_id)
-    if not info:
+    if not info or info.get("owner_id") != g.auth_user["id"]:
         return jsonify({"error": "render_id not found"}), 404
 
     path = info.get("path")
@@ -2073,6 +2217,8 @@ def video_director_get_session(session_id: str):
     """Inspect current session state (history, thought signature, previous interaction id)."""
     try:
         session = get_session(session_id)
+        if session.get("owner_id") != g.auth_user["id"]:
+            return jsonify({"error": "Session not found"}), 404
         return jsonify(session), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 404
