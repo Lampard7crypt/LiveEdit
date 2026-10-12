@@ -44,6 +44,17 @@ const AuthForm: React.FC<AuthFormProps> = ({ onClose }) => {
         >
           Continue with email
         </button>
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={() => void signIn({
+            redirectUri: `${window.location.origin}/callback`,
+            firstScreen: 'reset_password',
+          })}
+          className="mt-4 text-sm text-neutral-400 underline hover:text-white disabled:cursor-wait disabled:opacity-60"
+        >
+          Forgot your password?
+        </button>
         {error && (
           <p role="alert" className="mt-4 text-sm text-red-400">
             {error.message || 'Unable to start sign-in. Please try again.'}
