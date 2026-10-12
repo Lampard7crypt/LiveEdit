@@ -82,7 +82,7 @@ const App: React.FC = () => {
             throw new Error('Your sign-in session expired. Please sign in again.');
           }
           if (response.status === 403) {
-            throw new Error(data.error || 'A verified Google email is required.');
+            throw new Error(data.error || 'A verified email is required.');
           }
           throw new Error(data.error || 'Unable to set up your LiveEdit account.');
         }
