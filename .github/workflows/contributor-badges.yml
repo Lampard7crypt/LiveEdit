@@ -42,11 +42,6 @@ jobs:
               'badge:audio':  { file: 'audio-alchemist', title: 'Audio Alchemist' },
             };
 
-            // Don't hand badges to the maintainer's own PRs.
-            if (pr.author_association === 'OWNER') {
-              core.info('PR by repository owner, skipping.');
-              return;
-            }
 
             // Don't comment twice if the event somehow fires again.
             const existing = await github.paginate(github.rest.issues.listComments, {
