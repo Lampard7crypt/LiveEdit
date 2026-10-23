@@ -1,4 +1,5 @@
 # LiveEdit — AI-Powered Video Editor
+[![Tests](https://github.com/clencyc/LiveEdit/actions/workflows/tests.yml/badge.svg)](https://github.com/clencyc/LiveEdit/actions/workflows/tests.yml)
 
 LiveEdit is a full-stack app for AI-driven video analysis, editing and generation, built on Google Gemini. A React frontend talks to a Flask API; long-running work (analysis, rendering) runs asynchronously in Celery workers.
 
