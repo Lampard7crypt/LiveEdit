@@ -1,7 +1,7 @@
-# Logto Google sign-in
+# Logto authentication
 
-LiveEdit uses Logto for authentication and Google as the direct social sign-in
-provider. The React app stores the Logto session and sends its ID token to Flask.
+LiveEdit uses Logto for authentication. The React app stores the Logto session and
+sends its ID token to Flask.
 Flask validates the token signature with the tenant's JWKS, checks its issuer and
 application audience, then creates or resolves the local LiveEdit account. The
 development tenant currently signs ID tokens with ES384, which the backend
@@ -27,9 +27,14 @@ explicitly allows.
    (for example: `https://livedit.space,https://www.livedit.space`).
 
 The Google sign-in button requests the `social:google` connector directly. The
-Logto application must have that connector enabled. Email scope is requested,
-and the backend requires a verified email claim before creating or linking a
-LiveEdit account.
+Logto application must have that connector enabled. The email sign-in button
+opens Logto's hosted sign-in screen. The **Forgot your password?** action opens
+Logto's hosted reset-password screen directly. Logto sends the recovery
+verification code to the user's email and lets them set a new password; LiveEdit
+does not handle or store password-reset tokens. Enable the required identifier,
+password, and email connector settings in Logto for these options to work.
+Email scope is requested, and the backend requires a verified email claim before
+creating or linking a LiveEdit account.
 
 Restart the local API and Vite server after setting environment variables.
 `GET /health` remains public; all other `/api/*` endpoints require a valid
