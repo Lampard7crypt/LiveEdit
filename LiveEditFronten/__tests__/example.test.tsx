@@ -1,35 +1,42 @@
 /**
  * LiveEdit Frontend — Example Tests
- * Stack: Jest + React Testing Library
+ * Stack: Vitest + React Testing Library
  *
  * Run: cd LiveEditFronten && npm test
  */
 
 import React from "react";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, test, expect, vi, beforeEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import "@testing-library/jest-dom";
+import "@testing-library/jest-dom/vitest";
 
 // ─────────────────────────────────────────────
 // MOCKS
 // ─────────────────────────────────────────────
 
 // Mock the services layer — tests never hit a real server or Gemini API
-jest.mock("../services/api", () => ({
-  sendChatMessage: jest.fn(),
-  analyzeVideo: jest.fn(),
+vi.mock("../services/gemini", () => ({
+  chatWithBackend: vi.fn(),
+  analyzeVideoWithBackend: vi.fn(),
 }));
 
 // Mock useSubscription hook
-jest.mock("../hooks/useSubscription", () => ({
-  useSubscription: jest.fn(() => ({
-    isSubscribed: true,
-    plan: "pro",
+vi.mock("../hooks/useSubscription", () => ({
+  useSubscription: vi.fn(() => ({
+    subscription: {
+      status: "active",
+      plan: "pro",
+      end_date: null,
+    },
     loading: false,
+    error: null,
+    refetch: vi.fn(),
+    hasAccess: vi.fn(() => true),
   })),
 }));
 
-import { sendChatMessage, analyzeVideo } from "../services/api";
+import { chatWithBackend, analyzeVideoWithBackend } from "../services/gemini";
 import { useSubscription } from "../hooks/useSubscription";
 
 // ─────────────────────────────────────────────
@@ -125,9 +132,9 @@ describe("ChatInterface — interactions", () => {
     expect(input).toHaveValue("Analyse this clip");
   });
 
-  test("send button calls sendChatMessage with the typed message", async () => {
-    const mockSend = sendChatMessage as jest.Mock;
-    mockSend.mockResolvedValueOnce({ message: "Got it!", status: "success" });
+  test("send button calls chatWithBackend with the typed message", async () => {
+    const mockSend = vi.mocked(chatWithBackend);
+    mockSend.mockResolvedValueOnce("Got it!");
 
     const user = userEvent.setup();
 
@@ -140,7 +147,7 @@ describe("ChatInterface — interactions", () => {
             value={msg}
             onChange={(e) => setMsg(e.target.value)}
           />
-          <button onClick={() => sendChatMessage(msg)}>Send</button>
+          <button onClick={() => chatWithBackend(msg)}>Send</button>
         </div>
       );
     };
@@ -153,15 +160,15 @@ describe("ChatInterface — interactions", () => {
   });
 
   test("input clears after message is sent", async () => {
-    const mockSend = sendChatMessage as jest.Mock;
-    mockSend.mockResolvedValueOnce({ message: "Response", status: "success" });
+    const mockSend = vi.mocked(chatWithBackend);
+    mockSend.mockResolvedValueOnce("Response");
 
     const user = userEvent.setup();
 
     const ChatInterface = () => {
       const [msg, setMsg] = React.useState("");
       const handleSend = async () => {
-        await sendChatMessage(msg);
+        await chatWithBackend(msg);
         setMsg("");
       };
       return (
@@ -191,20 +198,26 @@ describe("ChatInterface — interactions", () => {
 
 describe("useSubscription hook", () => {
   test("returns subscription status and plan", () => {
-    const mockUseSubscription = useSubscription as jest.Mock;
+    const mockUseSubscription = vi.mocked(useSubscription);
     mockUseSubscription.mockReturnValueOnce({
-      isSubscribed: true,
-      plan: "pro",
+      subscription: {
+        status: "active",
+        plan: "pro",
+        end_date: null,
+      },
       loading: false,
+      error: null,
+      refetch: vi.fn(),
+      hasAccess: vi.fn(() => true),
     });
 
     const TestComponent = () => {
-      const { isSubscribed, plan, loading } = useSubscription();
+      const { subscription, loading } = useSubscription("user@example.com");
       if (loading) return <div>Loading...</div>;
       return (
         <div>
-          <span data-testid="subscribed">{isSubscribed ? "yes" : "no"}</span>
-          <span data-testid="plan">{plan}</span>
+          <span data-testid="subscribed">{subscription?.status === "active" ? "yes" : "no"}</span>
+          <span data-testid="plan">{subscription?.plan}</span>
         </div>
       );
     };
@@ -215,15 +228,17 @@ describe("useSubscription hook", () => {
   });
 
   test("shows loading state while fetching subscription", () => {
-    const mockUseSubscription = useSubscription as jest.Mock;
+    const mockUseSubscription = vi.mocked(useSubscription);
     mockUseSubscription.mockReturnValueOnce({
-      isSubscribed: false,
-      plan: null,
+      subscription: null,
       loading: true,
+      error: null,
+      refetch: vi.fn(),
+      hasAccess: vi.fn(() => false),
     });
 
     const TestComponent = () => {
-      const { loading } = useSubscription();
+      const { loading } = useSubscription("user@example.com");
       if (loading) return <div>Loading...</div>;
       return <div>Loaded</div>;
     };
@@ -233,16 +248,18 @@ describe("useSubscription hook", () => {
   });
 
   test("handles unsubscribed user", () => {
-    const mockUseSubscription = useSubscription as jest.Mock;
+    const mockUseSubscription = vi.mocked(useSubscription);
     mockUseSubscription.mockReturnValueOnce({
-      isSubscribed: false,
-      plan: null,
+      subscription: null,
       loading: false,
+      error: null,
+      refetch: vi.fn(),
+      hasAccess: vi.fn(() => false),
     });
 
     const SubscriptionGate = () => {
-      const { isSubscribed } = useSubscription();
-      return isSubscribed ? <div>Premium content</div> : <div>Upgrade to access</div>;
+      const { subscription } = useSubscription("user@example.com");
+      return subscription?.status === "active" ? <div>Premium content</div> : <div>Upgrade to access</div>;
     };
 
     render(<SubscriptionGate />);
@@ -254,32 +271,28 @@ describe("useSubscription hook", () => {
 // 4. SERVICE / API MOCK TESTS
 // ─────────────────────────────────────────────
 
-describe("sendChatMessage service", () => {
-  beforeEach(() => jest.clearAllMocks());
+describe("chatWithBackend service", () => {
+  beforeEach(() => vi.clearAllMocks());
 
   test("returns AI message on success", async () => {
-    const mockSend = sendChatMessage as jest.Mock;
-    mockSend.mockResolvedValueOnce({
-      message: "Here are your editing suggestions.",
-      status: "success",
-    });
+    const mockSend = vi.mocked(chatWithBackend);
+    mockSend.mockResolvedValueOnce("Here are your editing suggestions.");
 
-    const result = await sendChatMessage("Analyse my video");
-    expect(result.status).toBe("success");
-    expect(result.message).toBe("Here are your editing suggestions.");
+    const result = await chatWithBackend("Analyse my video");
+    expect(result).toBe("Here are your editing suggestions.");
   });
 
   test("throws on network error", async () => {
-    const mockSend = sendChatMessage as jest.Mock;
+    const mockSend = vi.mocked(chatWithBackend);
     mockSend.mockRejectedValueOnce(new Error("Network error"));
 
-    await expect(sendChatMessage("Hello")).rejects.toThrow("Network error");
+    await expect(chatWithBackend("Hello")).rejects.toThrow("Network error");
   });
 });
 
-describe("analyzeVideo service", () => {
+describe("analyzeVideoWithBackend service", () => {
   test("sends file and prompt, returns analysis object", async () => {
-    const mockAnalyze = analyzeVideo as jest.Mock;
+    const mockAnalyze = vi.mocked(analyzeVideoWithBackend);
     mockAnalyze.mockResolvedValueOnce({
       summary: "A 30s sunset clip.",
       key_events: [{ time: "00:05", event: "sun touches horizon" }],
@@ -287,7 +300,7 @@ describe("analyzeVideo service", () => {
     });
 
     const fakeFile = new File(["video content"], "test.mp4", { type: "video/mp4" });
-    const result = await analyzeVideo(fakeFile, "Summarise this video");
+    const result = await analyzeVideoWithBackend(fakeFile, "Summarise this video");
 
     expect(mockAnalyze).toHaveBeenCalledWith(fakeFile, "Summarise this video");
     expect(result.summary).toBe("A 30s sunset clip.");
