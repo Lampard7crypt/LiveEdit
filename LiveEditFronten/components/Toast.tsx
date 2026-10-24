@@ -8,15 +8,8 @@ export interface ToastProps {
 }
 
 export const Toast: React.FC<ToastProps> = ({ toast, onClose }) => {
-  let isDark = true;
-  try {
-    const { theme } = useTheme();
-    isDark = theme === 'dark';
-  } catch {
-    if (typeof document !== 'undefined') {
-      isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-    }
-  }
+  const { theme } = useTheme();
+  const isDark = theme === 'dark';
 
   useEffect(() => {
     const duration = toast.duration ?? 5000;
@@ -101,8 +94,6 @@ export interface ToastContainerProps {
 }
 
 export const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, onClose }) => {
-  if (toasts.length === 0) return null;
-
   return (
     <div
       className="fixed top-4 right-4 z-[9999] flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-4 sm:px-0"
